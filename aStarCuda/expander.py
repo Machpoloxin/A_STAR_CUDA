@@ -43,8 +43,13 @@ def device_expand_neighbors(
       cost[nz,ny,nx] = newc
       dist_to_obs = distance_field[nz,ny,nx]
       
+      next_coordinates = cuda.local.array(3, dtype=float32)
+      next_coordinates[0] = nx
+      next_coordinates[1] = ny
+      next_coordinates[2] = nz
       newpri = device_calculate_heuristic_f(cost[nz,ny,nx], mid_velocity, vel, 
-                                              dist_to_obs, weights, cur_coordinates , goal)
+                                              dist_to_obs, weights, next_coordinates , goal)
+      
       new_elem[0] = newpri
       new_elem[1] = nx
       new_elem[2] = ny
