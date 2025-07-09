@@ -103,8 +103,8 @@ A_STAR_CUDA/
 
 | Grid Size    |  Threads |         CPU A* (ms)         |     GPU A* (ms)    |
 |:------------:|:--------:|:---------------------------:|:------------------:|
-| 50×50×50     |    5     |     20                      |     around 3000    |
-| 50×50×50     |   400    | Very long execution time    |     around 3000    |
+| 50×50×50     |    5     |             20              |     around 1500    |
+| 50×50×50     |   400    |         around 1500         |     around 1500    |
 
 
 ## Contributing
