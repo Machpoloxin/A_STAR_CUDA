@@ -95,7 +95,7 @@ def run_astar_search_numba(grid, start, start_v, goal, goal_v, weights, velocity
 
     h_paths, h_path_lens = reconstruct_path_if_goal (d_pred_x, d_pred_y, d_pred_z, d_pred_v,
                                                         d_start, d_start_v, d_goal, d_goal_v,
-                                                        d_finished_markers, n_cells)
+                                                        d_finished_markers, depth + height + width)
         
 
     return h_paths, h_path_lens
