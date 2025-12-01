@@ -1,117 +1,178 @@
-
 import numpy as np
-from numba import njit, cuda, float32, int32
-from aStarCuda.heuristic import device_calculate_heuristic_f
-from aStarCuda.globalEnv import MAX_NEI, INF
+from numba import cuda, float32, int32, int8
+import math
+
 
 @cuda.jit(device=True)
-def device_expand_neighbors(
-    cur_coordinates, goal,
-    grid, cost, pred_x, pred_y, pred_z, pred_v,
-    distance_field, weights, mid_velocity,  vel, dx, dy, dz,
-    width, height, depth, new_elem, d_cur_add_elems
-):
-    cx = cur_coordinates[0]
-    cy = cur_coordinates[1]
-    cz = cur_coordinates[2]
-    if cx == goal[0] and cy == goal[1] and cz == goal[2]:
-      return
-
-    if dx==0 and dy==0 and dz==0:
-      return
-    nx, ny, nz = cx+dx, cy+dy, cz+dz
-    # boundary check
-    if not (0<=nx<width and 0<=ny<height and 0<=nz<depth):
-      return
-    if grid[nz,ny,nx] != 0:
-      return
-    # move cost
-    s = abs(dx)+abs(dy)+abs(dz)
-    if s == 1:
-        move_cost = 1.0
-    elif s == 2:
-        move_cost = 1.41
-    else:
-        move_cost = 1.73
-
-    # new cost
-    base = cost[cz,cy,cx]
-    newc = base + move_cost/(vel+1.0)*weights[0]
-
-    if newc < cost[nz,ny,nx]:
-      d_cur_add_elems = d_cur_add_elems + 1
-      cost[nz,ny,nx] = newc
-      dist_to_obs = distance_field[nz,ny,nx]
-      
-      next_coordinates = cuda.local.array(3, dtype=float32)
-      next_coordinates[0] = nx
-      next_coordinates[1] = ny
-      next_coordinates[2] = nz
-      newpri = device_calculate_heuristic_f(cost[nz,ny,nx], mid_velocity, vel, 
-                                              dist_to_obs, weights, next_coordinates , goal)
-      
-      new_elem[0] = newpri
-      new_elem[1] = nx
-      new_elem[2] = ny
-      new_elem[3] = nz
-
-      pred_x[nz,ny,nx] = cx
-      pred_y[nz,ny,nx] = cy
-      pred_z[nz,ny,nx] = cz
-      pred_v[nz,ny,nx] = vel
+def device_heap_push(heap, heap_size, elem):
+    idx = heap_size[0]
+    heap[idx, 0] = elem[0]
+    heap[idx, 1] = elem[1]
+    heap[idx, 2] = elem[2]
+    heap[idx, 3] = elem[3]
+    heap_size[0] += 1
     
+    i = idx
+    while i > 0:
+        parent = (i - 1) // 2
+        if heap[parent, 0] > heap[i, 0]:
+            # Swap
+            t0, t1, t2, t3 = heap[parent, 0], heap[parent, 1], heap[parent, 2], heap[parent, 3]
+            heap[parent, 0] = heap[i, 0]
+            heap[parent, 1] = heap[i, 1]
+            heap[parent, 2] = heap[i, 2]
+            heap[parent, 3] = heap[i, 3]
+            heap[i, 0] = t0
+            heap[i, 1] = t1
+            heap[i, 2] = t2
+            heap[i, 3] = t3
+            i = parent
+        else:
+            break
 
 @cuda.jit
-def kernel_expand_neighbors(cur_coordinates, goal,
-    grid, cur_cost, pred_x, pred_y, pred_z, pred_v,
-    distance_field, weights, mid_velocity, vel, dx, dy, dz,
-    width, height, depth, out_elems, d_finished_markers, d_cur_add_elems):
-
-    tid = cuda.grid(1)
-    if tid >= cur_coordinates.shape[0] or d_finished_markers[tid] == 1:
-      return
-    
-    if (cur_coordinates[tid, 0] == goal[0] and
-        cur_coordinates[tid, 1] == goal[1] and
-        cur_coordinates[tid, 2] == goal[2]):
-      d_finished_markers[tid] = 1
-      return
-    
-    device_expand_neighbors(cur_coordinates[tid], goal,
-                            grid, cur_cost[tid], pred_x[tid], pred_y[tid], pred_z[tid], pred_v[tid],
-                            distance_field, weights[tid], mid_velocity, vel, dx, dy, dz,
-                            width, height, depth, out_elems[tid], d_cur_add_elems[tid])
-            
-            
-def expand_neighbors(fullBinThree, cur_coordinates, goal,
-    grid, cur_cost, pred_x, pred_y, pred_z, pred_v,
+def kernel_expand_all_neighbors(
+    heap, heap_size,
+    grid, cost, pred_action,
     distance_field, weights, mid_velocity, velocity_grid,
-    width, height, depth, d_finished_markers, MAX_NEI=MAX_NEI):
+    width, height, depth, 
+    d_finished_markers,
+    goal_coords
+):
+    tid = cuda.grid(1)
+    
+    # cost shape is (D, H, W, N) -> tid is the last dimension
+    if tid >= cost.shape[3] or d_finished_markers[tid] == 1:
+        return
 
-    num_threads = cur_coordinates.shape[0]
-    threads_per_block = 128
-    blocks_per_grid = (num_threads + (threads_per_block - 1)) // threads_per_block # round up
-    new_elems = -1 * np.ones((weights.shape[0],4), dtype=np.float32)
-    new_elems[:,0] = INF
-    cur_add_elems = np.zeros((weights.shape[0],), dtype=np.int32)
-    d_cur_add_elems = cuda.to_device(cur_add_elems)
-    for dx in (-1,0,1):
-      for dy in (-1,0,1):
-        for dz in (-1,0,1):
-          for vi in range(velocity_grid.shape[0]):
+    if heap_size[tid] == 0:
+        return 
+
+    # --- Pop Top Element ---
+    curr_f = heap[tid, 0, 0]
+    cx = int32(heap[tid, 0, 1])
+    cy = int32(heap[tid, 0, 2])
+    cz = int32(heap[tid, 0, 3])
+    
+    # Check Goal
+    if cx == goal_coords[0] and cy == goal_coords[1] and cz == goal_coords[2]:
+        d_finished_markers[tid] = 1
+        return
+
+    # Heap Remove & Bubble Down
+    last_idx = heap_size[tid] - 1
+    heap[tid, 0, 0] = heap[tid, last_idx, 0]
+    heap[tid, 0, 1] = heap[tid, last_idx, 1]
+    heap[tid, 0, 2] = heap[tid, last_idx, 2]
+    heap[tid, 0, 3] = heap[tid, last_idx, 3]
+    heap_size[tid] = last_idx
+    
+    i = 0
+    size = heap_size[tid]
+    while True:
+        left = 2 * i + 1
+        right = 2 * i + 2
+        smallest = i
+        if left < size and heap[tid, left, 0] < heap[tid, smallest, 0]:
+            smallest = left
+        if right < size and heap[tid, right, 0] < heap[tid, smallest, 0]:
+            smallest = right
+        if smallest != i:
+            t0, t1, t2, t3 = heap[tid, i, 0], heap[tid, i, 1], heap[tid, i, 2], heap[tid, i, 3]
+            heap[tid, i, 0] = heap[tid, smallest, 0]
+            heap[tid, i, 1] = heap[tid, smallest, 1]
+            heap[tid, i, 2] = heap[tid, smallest, 2]
+            heap[tid, i, 3] = heap[tid, smallest, 3]
+            heap[tid, smallest, 0] = t0
+            heap[tid, smallest, 1] = t1
+            heap[tid, smallest, 2] = t2
+            heap[tid, smallest, 3] = t3
+            i = smallest
+        else:
+            break
+            
+    current_cost = cost[cz, cy, cx, tid]
+    
+    # Iterate 27 directions
+    for move_idx in range(27):
+        # Decode move_idx (0..26) -> dx, dy, dz
+        dz = (move_idx // 9) - 1
+        rem = move_idx % 9
+        dy = (rem // 3) - 1
+        dx = (rem % 3) - 1
+
+        if dx == 0 and dy == 0 and dz == 0:
+            continue
+
+        nx = cx + dx
+        ny = cy + dy
+        nz = cz + dz
+
+        # Boundary Check
+        if nx < 0 or nx >= width or ny < 0 or ny >= height or nz < 0 or nz >= depth:
+            continue
+        
+        # Obstacle Check
+        if grid[nz, ny, nx] != 0:
+            continue
+
+        # Move Cost
+        dist_sq = dx*dx + dy*dy + dz*dz
+        move_cost = math.sqrt(float32(dist_sq))
+
+        # Velocity Loop
+        for vi in range(velocity_grid.shape[0]):
             vel = velocity_grid[vi]
-            d_new_elems = cuda.to_device(new_elems)
-            kernel_expand_neighbors[blocks_per_grid, threads_per_block](
-                cur_coordinates, goal,
-                grid, cur_cost, pred_x, pred_y, pred_z, pred_v,
-                distance_field, weights, mid_velocity, vel, dx, dy, dz,
-                width, height, depth, d_new_elems, d_finished_markers, d_cur_add_elems
-            )
-            fullBinThree.push(d_new_elems)
+            # Heuristic Weight [0]: c1
+            added_cost = (move_cost / (vel + 1.0)) * weights[tid, 0]
+            new_g = current_cost + added_cost
+            
+            # Read old cost from Global Memory 
+            old_g = cost[nz, ny, nx, tid]
+            if new_g < old_g:
+                cost[nz, ny, nx, tid] = new_g
+                # Calculate Heuristic Inline
+                dist_obs = distance_field[nz, ny, nx]
+                c1 = weights[tid, 0]
+                c2 = weights[tid, 1]
+                
+                diff_x = nx - goal_coords[0]
+                diff_y = ny - goal_coords[1]
+                diff_z = nz - goal_coords[2]
+                euc = math.sqrt(diff_x*diff_x + diff_y*diff_y + diff_z*diff_z)
+                
+                h_val = c1 * (euc / mid_velocity) + c2 * (1.0 / (dist_obs + 1e-3))
+                f_val = new_g + h_val
+
+                # Store Action (Compressed Predecessor)
+                # action_code = move_idx (0-26) + 27 * velocity_index
+                action_code = int8(move_idx + 27 * vi)
+                pred_action[nz, ny, nx, tid] = action_code
+
+                # Push to Heap
+                new_item = cuda.local.array(4, dtype=float32)
+                new_item[0] = f_val
+                new_item[1] = float32(nx)
+                new_item[2] = float32(ny)
+                new_item[3] = float32(nz)
+                
+                device_heap_push(heap[tid], heap_size[tid:], new_item)
+
+def expand_neighbors_fused(
+    heap_manager, 
+    grid, d_cost, d_pred_action,
+    d_distance_field, d_weights, mid_velocity, d_velocity_grid,
+    width, height, depth, d_finished_markers, goal):
+
+    num_threads = d_weights.shape[0]
+    threads_per_block = 128
+    blocks_per_grid = (num_threads + (threads_per_block - 1)) // threads_per_block
+
+    kernel_expand_all_neighbors[blocks_per_grid, threads_per_block](
+        heap_manager.heap, heap_manager.heap_size,
+        grid, d_cost, d_pred_action,
+        d_distance_field, d_weights, mid_velocity, d_velocity_grid,
+        width, height, depth, 
+        d_finished_markers, goal
+    )
     cuda.synchronize()
-    fullBinThree.delete_last(d_cur_add_elems)
-    cuda.synchronize()
-
-    return fullBinThree
-
-
