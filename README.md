@@ -19,10 +19,6 @@ A high-performance CUDA implementation of the A* pathfinding algorithm in 3D vox
   - [Installation](#installation)
   - [Usage](#usage)
   - [File Structure](#file-structure)
-  - [Performance](#performance)
-    - [Test on an NVIDIA RTX 4060:](#test-on-an-nvidia-rtx-4060)
-  - [Contributing](#contributing)
-  - [License](#license)
 
 ## Requirements
 
@@ -96,21 +92,4 @@ A_STAR_CUDA/
 │   └── test.ipynb          # Usage
 ├── requirements.txt
 └── README.md               # This file
-```
-
-## Performance
-### Test on an NVIDIA RTX 4060:
-
-| Grid Size    |  Threads |         CPU A* (ms)         |     GPU A* (ms)    |
-|:------------:|:--------:|:---------------------------:|:------------------:|
-| 50×50×50     |    5     |             20              |     around 1500    |
-| 50×50×50     |   400    |         around 1500         |     around 1500    |
-
-
-## Contributing
-Contributions are welcome! Please open issues or submit pull requests.
-
-## License
-This project is licensed under the "---" License. See **LICENSE** for details.
-```
 ```
